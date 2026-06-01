@@ -22,8 +22,11 @@ def get_data(ticker):
         stock = yf.Ticker(ticker)
         info = stock.info
         # 역사적 데이터 추출 (최근 3년 연간 재무제표)
-        hist_financials = stock.financials
-        return {"stock": stock, "info": info, "hist": hist_financials}
+        return {
+            "info": info,
+            "financials": stock.financials,
+            "history": stock.history(period="3y")
+        }
     except Exception:
         return None
 
@@ -32,7 +35,6 @@ data_bundle = get_data(ticker_symbol)
 
 if data_bundle and 'info' in data_bundle:
     info = data_bundle['info']
-    stock = data_bundle['stock']
     
     # 1. 상단 요약 정보 (시가총액 Billion 단위)
     col1, col2, col3, col4 = st.columns(4)
@@ -44,7 +46,7 @@ if data_bundle and 'info' in data_bundle:
         st.metric("섹터", info.get('sector', 'N/A'))
     with col4:
         m_cap_billion = info.get('marketCap', 0) / 1e9
-        st.metric("시가총액", f".2fB")
+        st.metric("시가총액", f"${m_cap_billion:.2f}B")
 
     # 2. 밸류에이션 지표 추출 함수 (순서 고정)
     def extract_metrics(target_info):
@@ -58,15 +60,15 @@ if data_bundle and 'info' in data_bundle:
         }
 
     # 3. 역사적 평균 계산 (최근 3년 데이터 기준)
-    def get_historical_avg_metrics(stock_obj):
+    def get_historical_avg_metrics(bundle):
         try:
             # 주가와 발행주식수를 이용한 대략적 과거 배수 계산
-            hist = stock_obj.history(period="3y")
+            hist = bundle['history']
             avg_price = hist['Close'].mean()
             shares = info.get('sharesOutstanding', 1)
             
             # 재무제표 데이터
-            fin = stock_obj.financials.T
+            fin = bundle['financials'].T
             if fin.empty: return {}
             
             avg_net_income = fin['Net Income'].mean() if 'Net Income' in fin.columns else None
@@ -90,7 +92,7 @@ if data_bundle and 'info' in data_bundle:
     rows.append({"Ticker": f"{ticker_symbol} (Current)", **current_metrics})
     
     # (2) 역사적 평균
-    hist_metrics = get_historical_avg_metrics(stock)
+    hist_metrics = get_historical_avg_metrics(data_bundle)
     if hist_metrics:
         rows.append({"Ticker": f"{ticker_symbol} (3Y Avg)", **hist_metrics})
     
