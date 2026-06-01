@@ -7,102 +7,136 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="US Stock Valuation Dashboard", layout="wide")
 
 st.title("📊 미국 주식 밸류에이션 분석 대시보드")
-st.markdown("티커를 입력하면 현재 밸류에이션 지표를 경쟁사 및 역사적 수치와 비교합니다.")
+st.markdown("티커를 입력하면 현재 지표를 **역사적 평균(3년)** 및 **경쟁사**와 비교합니다.")
 
-# 사이드바: 티커 입력 및 경쟁사 설정
+# 사이드바 설정
 with st.sidebar:
-    ticker_symbol = st.text_input("분석할 티커 입력 (예: AAPL)", value="AAPL").upper()
-    compare_tickers = st.text_input("비교할 경쟁사 티커 (쉼표 구분)", value="MSFT, GOOGL, AMZN").upper().split(',')
-    compare_tickers = [t.strip() for t in compare_tickers]
+    st.header("설정")
+    ticker_symbol = st.text_input("분석할 티커 (예: AAPL)", value="AAPL").upper()
+    compare_tickers_input = st.text_input("비교할 경쟁사 (쉼표 구분)", value="MSFT, GOOGL, AMZN").upper()
+    compare_tickers = [t.strip() for t in compare_tickers_input.split(',') if t.strip()]
 
-@st.cache_data
-def get_stock_data(ticker):
+@st.cache_data(ttl=3600)
+def get_data(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        return info
-    except:
+        # 역사적 데이터 추출 (최근 3년 연간 재무제표)
+        hist_financials = stock.financials
+        return {"stock": stock, "info": info, "hist": hist_financials}
+    except Exception:
         return None
 
 # 데이터 가져오기
-target_info = get_stock_data(ticker_symbol)
+data_bundle = get_data(ticker_symbol)
 
-if target_info:
-    # 대시보드 상단 요약
+if data_bundle and 'info' in data_bundle:
+    info = data_bundle['info']
+    stock = data_bundle['stock']
+    
+    # 1. 상단 요약 정보 (시가총액 Billion 단위)
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("종목명", target_info.get('longName'))
-    col2.metric("현재가", f"${target_info.get('currentPrice')}")
-    col3.metric("섹터", target_info.get('sector'))
-    col4.metric("시가총액", f"${target_info.get('marketCap', 0):,}")
+    with col1:
+        st.metric("종목명", info.get('longName', 'N/A'))
+    with col2:
+        st.metric("현재가", f"${info.get('currentPrice', 0):.2f}")
+    with col3:
+        st.metric("섹터", info.get('sector', 'N/A'))
+    with col4:
+        m_cap_billion = info.get('marketCap', 0) / 1e9
+        st.metric("시가총액", f".2fB")
 
-    # 밸류에이션 지표 추출 함수
-    def extract_metrics(info):
+    # 2. 밸류에이션 지표 추출 함수 (순서 고정)
+    def extract_metrics(target_info):
         return {
-            "PER (Trailing)": info.get('trailingPE'),
-            "Forward PER": info.get('forwardPE'),
-            "PEG Ratio": info.get('pegRatio'),
-            "P/S Ratio": info.get('priceToSalesTrailing12Months'),
-            "EV/EBITDA": info.get('enterpriseToEbitda'),
-            "P/B Ratio": info.get('priceToBook')
+            "PER (Trailing)": target_info.get('trailingPE'),
+            "Forward PER": target_info.get('forwardPE'),
+            "PEG Ratio": target_info.get('pegRatio'),
+            "P/S Ratio": target_info.get('priceToSalesTrailing12Months'),
+            "P/B Ratio": target_info.get('priceToBook'),
+            "EV/EBITDA": target_info.get('enterpriseToEbitda')
         }
 
-    target_metrics = extract_metrics(target_info)
+    # 3. 역사적 평균 계산 (최근 3년 데이터 기준)
+    def get_historical_avg_metrics(stock_obj):
+        try:
+            # 주가와 발행주식수를 이용한 대략적 과거 배수 계산
+            hist = stock_obj.history(period="3y")
+            avg_price = hist['Close'].mean()
+            shares = info.get('sharesOutstanding', 1)
+            
+            # 재무제표 데이터
+            fin = stock_obj.financials.T
+            if fin.empty: return {}
+            
+            avg_net_income = fin['Net Income'].mean() if 'Net Income' in fin.columns else None
+            avg_rev = fin['Total Revenue'].mean() if 'Total Revenue' in fin.columns else None
+            
+            return {
+                "PER (Trailing)": avg_price / (avg_net_income / shares) if avg_net_income else None,
+                "Forward PER": None, # 미래 예측치는 과거 평균이 없음
+                "PEG Ratio": None,
+                "P/S Ratio": (avg_price * shares) / avg_rev if avg_rev else None,
+                "P/B Ratio": info.get('priceToBook'), # P/B는 현재 데이터 활용 권장
+                "EV/EBITDA": None
+            }
+        except:
+            return {}
+
+    # 비교 데이터 프레임 생성
+    rows = []
+    # (1) 대상 종목 현재가
+    current_metrics = extract_metrics(info)
+    rows.append({"Ticker": f"{ticker_symbol} (Current)", **current_metrics})
     
-    # 경쟁사 데이터 수집
-    comparison_data = []
-    comparison_data.append({"Ticker": ticker_symbol, **target_metrics})
+    # (2) 역사적 평균
+    hist_metrics = get_historical_avg_metrics(stock)
+    if hist_metrics:
+        rows.append({"Ticker": f"{ticker_symbol} (3Y Avg)", **hist_metrics})
     
+    # (3) 경쟁사 데이터
     for t in compare_tickers:
-        c_info = get_stock_data(t)
-        if c_info:
-            comparison_data.append({"Ticker": t, **extract_metrics(c_info)})
+        c_data = get_data(t)
+        if c_data:
+            rows.append({"Ticker": t, **extract_metrics(c_data['info'])})
     
-    df_compare = pd.DataFrame(comparison_data).set_index("Ticker")
+    df_compare = pd.DataFrame(rows).set_index("Ticker")
 
-    # 시각화 부분
-    st.subheader("📋 밸류에이션 지표 비교")
-    
-    metrics_to_show = ["PER (Trailing)", "Forward PER", "PEG Ratio", "P/S Ratio", "EV/EBITDA", "P/B Ratio"]
-    
-    # 탭을 이용한 지표별 차트 구성
-    tabs = st.tabs(metrics_to_show)
-    
-    for i, metric in enumerate(metrics_to_show):
+    # 4. 시각화 섹션
+    st.subheader("📋 주요 밸류에이션 지표 비교")
+    metrics_list = ["PER (Trailing)", "Forward PER", "PEG Ratio", "P/S Ratio", "P/B Ratio", "EV/EBITDA"]
+    tabs = st.tabs(metrics_list)
+
+    for i, metric in enumerate(metrics_list):
         with tabs[i]:
-            fig = go.Figure()
-            # 경쟁사들 바 차트
-            fig.add_trace(go.Bar(
-                x=df_compare.index,
-                y=df_compare[metric],
-                marker_color=['#1f77b4' if x == ticker_symbol else '#d3d3d3' for x in df_compare.index],
-                text=df_compare[metric].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"),
-                textposition='auto'
-            ))
-            
-            # 평균선 추가
-            avg_val = df_compare[metric].mean()
-            fig.add_shape(type="line", line=dict(color="Red", dash="dash"),
-                          x0=-0.5, x1=len(df_compare)-0.5, y0=avg_val, y1=avg_val)
-            
-            fig.update_layout(title=f"{metric} 비교 (빨간선: 그룹 평균)", 
-                              yaxis_title="배수",
-                              showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            clean_df = df_compare[df_compare[metric].notnull()]
+            if not clean_df.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=clean_df.index,
+                    y=clean_df[metric],
+                    marker_color=['#1f77b4' if ticker_symbol in x else '#d3d3d3' for x in clean_df.index],
+                    text=clean_df[metric].apply(lambda x: f"{x:.1f}"),
+                    textposition='auto'
+                ))
+                # 평균선
+                avg_val = clean_df[metric].mean()
+                fig.add_shape(type="line", line=dict(color="Red", dash="dash"),
+                              x0=-0.5, x1=len(clean_df)-0.5, y0=avg_val, y1=avg_val)
+                
+                fig.update_layout(title=f"{metric} (현재 vs 역사적 평균 vs 경쟁사)", yaxis_title="배수", height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"{metric} 데이터를 불러올 수 없습니다.")
 
-    # 상세 데이터 테이블
-    st.subheader("데이터 상세 보기")
-    st.dataframe(df_compare.style.highlight_max(axis=0, color='#ffcccc').highlight_min(axis=0, color='#ccffcc'))
+    # 5. 데이터 테이블 섹션 (소수점 한자리, 오른쪽 정렬)
+    st.subheader("📊 상세 데이터 비교")
+    styled_df = df_compare.style.format(precision=1, na_rep="-") \
+                .set_properties(**{'text-align': 'right'}) \
+                .highlight_min(axis=0, color='#ccffcc') # 수치가 낮을수록(저평가) 녹색
+    
+    st.dataframe(styled_df, use_container_width=True)
 
-    st.info("""
-    **💡 지표 가이드:**
-    - **PER**: 이익 대비 주가 수준. 낮을수록 저평가이나 성장성이 낮을 수 있음.
-    - **PEG**: PER을 성장률로 나눈 값. 보통 1 미만이면 매우 매력적.
-    - **P/S**: 매출 대비 주가. 이익이 나지 않는 성장주 분석에 유용.
-    - **EV/EBITDA**: 영업현금창출능력 대비 기업가치. 감가상각비 영향을 배제함.
-    """)
+    st.caption("참고: 역사적 평균(3Y Avg)은 최근 3년 재무제표의 평균값으로 계산된 추정치입니다.")
 else:
-    st.error("티커를 찾을 수 없습니다. 정확한 심볼을 입력해주세요.")
-streamlit
-yfinance
-pandas
-plotly
+    st.error("데이터를 가져오는 중 오류가 발생했습니다. 티커를 다시 확인해 주세요.")
